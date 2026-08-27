@@ -35,6 +35,11 @@ string(REPLACE ";" "\\;" OTN_LINK_ARGS_ESC "${OTN_LINK_ARGS}")
 # link line; without it the harness compiles without its FFI bindings, so a
 # plain `cargo test` outside this target still works.
 #
+# OTN_SHIM_TRACE=1 makes the shim bracket each core construction and destruction
+# with a stderr marker. glibc reports heap damage at the next allocation, not at
+# the write that caused it, so without the markers an abort inside a core says
+# nothing about which core or which phase produced it.
+#
 # RUST_TEST_THREADS=1 is not a speed knob: the C++ cores behind the shim were
 # written for one core per process (the reducer runs a core per thread in
 # separate shards, and the logging core touches process-wide metric state), so
@@ -49,6 +54,7 @@ execute_process(
     OTN_LINK_LIBS=${OTN_LINK_LIBS_ESC}
     OTN_LINK_ARGS=${OTN_LINK_ARGS_ESC}
     OTN_SHIM_LIB=${SHIM_LIB}
+    OTN_SHIM_TRACE=1
     RUST_TEST_THREADS=1
     cargo test --manifest-path ${PROJ_DIR}/Cargo.toml
   WORKING_DIRECTORY ${PROJ_DIR}

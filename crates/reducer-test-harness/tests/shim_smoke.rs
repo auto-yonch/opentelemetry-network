@@ -22,8 +22,13 @@ fn matching_core() -> Core {
     Core::new(CoreKind::Matching, T0).expect("the matching core should be constructible")
 }
 
+// The two cores get their own lifecycle tests rather than sharing one. They are
+// C++ objects in a shared process: when one damages the heap, the abort lands
+// wherever the next allocation happens, so a test that builds both cannot say
+// which one was at fault.
+
 #[test]
-fn a_core_can_be_created_and_dropped() {
+fn a_matching_core_can_be_created_and_dropped() {
     let core = matching_core();
     assert_eq!(core.kind(), CoreKind::Matching);
     assert_eq!(core.last_error(), "");
@@ -31,10 +36,15 @@ fn a_core_can_be_created_and_dropped() {
     // Dropping runs otn_core_shim_destroy; a leak or double free shows up here
     // under the sanitizers CI runs.
     drop(core);
+}
 
+#[test]
+fn a_logging_core_can_be_created_and_dropped() {
     let logging =
         Core::new(CoreKind::Logging, T0).expect("the logging core should be constructible");
     assert_eq!(logging.kind(), CoreKind::Logging);
+
+    drop(logging);
 }
 
 #[test]

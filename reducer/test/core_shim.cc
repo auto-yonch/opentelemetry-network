@@ -12,6 +12,8 @@
 #include <util/element_queue_cpp.h>
 #include <util/element_queue_writer.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <functional>
@@ -46,6 +48,29 @@ constexpr int64_t kMaxPumpPasses = 4096;
 // having consumed nothing, which is what it looks like from the outside
 // (`reducer/util/virtual_clock.cc`).
 constexpr int kIdlePassesUntilQuiescent = 2;
+
+// Writes a lifecycle marker to stderr when OTN_SHIM_TRACE=1.
+//
+// A core is a C++ object created and dropped by a Rust test binary. When one of
+// them dies the way glibc reports heap damage -- a bare "corrupted double-linked
+// list" and SIGABRT, raised at the next allocation rather than at the offending
+// write -- the output says nothing about which core, or whether it died being
+// built or being torn down. These markers bound each phase so the last one
+// printed names the phase that failed.
+void trace(char const *phase, std::string_view core)
+{
+  static bool const enabled = []() {
+    char const *value = std::getenv("OTN_SHIM_TRACE");
+    return value != nullptr && value[0] == '1';
+  }();
+
+  if (!enabled) {
+    return;
+  }
+
+  std::fprintf(stderr, "[core_shim] %s %.*s\n", phase, static_cast<int>(core.size()), core.data());
+  std::fflush(stderr);
+}
 
 // A core instance plus the edges around it, with the parts of Core that tests
 // need to drive exposed.
@@ -213,13 +238,20 @@ private:
 
 std::unique_ptr<ShimCore> make_core(std::string_view name, u64 initial_timestamp)
 {
+  trace("constructing", name);
+
+  std::unique_ptr<ShimCore> instance;
   if (name == "matching") {
-    return std::make_unique<MatchingShim>(initial_timestamp);
+    instance = std::make_unique<MatchingShim>(initial_timestamp);
+  } else if (name == "logging") {
+    instance = std::make_unique<LoggingShim>(initial_timestamp);
+  } else {
+    return nullptr;
   }
-  if (name == "logging") {
-    return std::make_unique<LoggingShim>(initial_timestamp);
-  }
-  return nullptr;
+
+  trace("constructed", name);
+
+  return instance;
 }
 
 } // namespace
@@ -228,9 +260,10 @@ std::unique_ptr<ShimCore> make_core(std::string_view name, u64 initial_timestamp
 // failure, so a negative return code can be explained.
 struct otn_core_shim {
   std::unique_ptr<ShimCore> core;
+  std::string kind;
   std::string last_error;
 
-  explicit otn_core_shim(std::unique_ptr<ShimCore> c) : core(std::move(c)) {}
+  otn_core_shim(std::unique_ptr<ShimCore> c, std::string_view k) : core(std::move(c)), kind(k) {}
 };
 
 namespace {
@@ -292,7 +325,7 @@ otn_core_shim *otn_core_shim_create(char const *core, uint64_t initial_timestamp
     if (instance == nullptr) {
       return nullptr;
     }
-    return new otn_core_shim(std::move(instance));
+    return new otn_core_shim(std::move(instance), core);
   } catch (...) {
     // No handle exists yet to carry the message; the null return is all the
     // caller can act on.
@@ -302,7 +335,16 @@ otn_core_shim *otn_core_shim_create(char const *core, uint64_t initial_timestamp
 
 void otn_core_shim_destroy(otn_core_shim *shim)
 {
+  if (shim == nullptr) {
+    return;
+  }
+
+  std::string const kind = shim->kind;
+  trace("destroying", kind);
+
   delete shim;
+
+  trace("destroyed", kind);
 }
 
 int64_t otn_core_shim_inject(otn_core_shim *shim, char const *edge, uint8_t const *data, size_t len)
