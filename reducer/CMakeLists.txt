@@ -163,6 +163,10 @@ add_rust_main(
 
 add_dependencies(pipeline reducer-stripped)
 
+# Test-only shim + the cargo-test target that links it. Comes after
+# REDUCER_LINK_LIBRARIES is set, which it reuses for its link line.
+add_subdirectory(test)
+
 # Docker image
 #
 if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")

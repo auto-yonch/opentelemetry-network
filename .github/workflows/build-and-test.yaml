@@ -63,6 +63,21 @@ jobs:
       with:
         fetch-depth: 0
 
+    # The cargo-test target now builds the C++ reducer library and the test-only
+    # core shim that the Rust core tests link against, so this job compiles C++.
+    - name: Cache and install ccache
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: ccache
+        version: 1.0
+
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ccache-cargo-test
+        max-size: 1G
+        verbose: 2
+
     - name: Run cargo test
       env:
         PASS: ${{ secrets.DOCKER_PASSWORD }}
@@ -71,10 +86,15 @@ jobs:
         docker pull $BENV_IMAGE
         git submodule update  --init --recursive ext/
 
+        mkdir -p "${{ github.workspace }}/.ccache"
+        chmod -R 777 "${{ github.workspace }}/.ccache" || true
+
         docker run -t \
         --rm \
+        --mount "type=bind,source=${{ github.workspace }}/.ccache,destination=/ccache" \
         --mount "type=bind,source=$(git rev-parse --show-toplevel),destination=/home/user/src,readonly" \
         --env EBPF_NET_SRC_ROOT=/home/user/src \
+        --env CCACHE_DIR=/ccache \
         $BENV_IMAGE \
         ./build.sh cargo-test
 
