@@ -65,7 +65,9 @@ impl core::fmt::Debug for ElementQueue {
 impl ElementQueue {
     /// Create a queue over contiguous memory ([shared][elems][data]).
     ///
-    /// Safety: `data` must be a valid, writable pointer to at least
+    /// # Safety
+    ///
+    /// `data` must be a valid, writable pointer to at least
     /// `contig_size(n_elems, buf_len)` bytes with the expected layout.
     pub unsafe fn new_from_contiguous(
         n_elems: u32,
@@ -142,7 +144,7 @@ impl ElementQueue {
 }
 
 impl<'q> WriteBatch<'q> {
-    pub fn write<'a>(&'a mut self, len: u32) -> Result<&'a mut [u8], EqError> {
+    pub fn write(&mut self, len: u32) -> Result<&mut [u8], EqError> {
         let aligned_len = (len + 7) & !7;
         if aligned_len > self.q.buf_mask {
             return Err(EqError::InvalidArg);

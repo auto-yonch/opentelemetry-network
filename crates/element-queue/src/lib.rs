@@ -12,10 +12,12 @@ pub mod errno {
 
 pub mod layout;
 pub mod raw;
+pub mod writer;
 
 // Re-export for backwards-compatibility with the previous single-module layout.
 pub use layout::{contig_size, ElementQueueShared};
 pub use raw::{ElementQueue, EqError, ReadBatch, WriteBatch};
+pub use writer::{EqView, EqWriter, MessageBatch, MessageKind, MessageSize, TIMESTAMP_SIZE};
 
 /// Owned contiguous storage for an element queue, similar to MemElementQueueStorage.
 pub struct MemElementQueueStorage {
@@ -28,7 +30,7 @@ impl MemElementQueueStorage {
     pub fn new(n_elems: u32, buf_len: u32) -> Self {
         let size = contig_size(n_elems, buf_len);
         // Allocate with u64 alignment and round up size to u64 words
-        let words = (size + 7) / 8;
+        let words = size.div_ceil(8);
         let mut buf = vec![0u64; words];
         // Initialize shared header
         let ptr = buf.as_mut_ptr() as *mut u8;
@@ -55,8 +57,25 @@ impl MemElementQueueStorage {
         unsafe { ElementQueue::new_from_contiguous(self.n_elems, self.buf_len, self.data_ptr()) }
     }
 
+    /// Producer handle over this storage, for writing render-encoded messages.
+    pub fn make_writer(&self) -> Result<crate::writer::EqWriter, EqError> {
+        Ok(crate::writer::EqWriter::from_queue(self.make_queue()?))
+    }
+
+    /// Descriptor for this storage, in the shape the cxx bridge passes across.
+    pub fn view(&self) -> crate::writer::EqView {
+        crate::writer::EqView {
+            data: self.data_ptr(),
+            n_elems: self.n_elems,
+            buf_len: self.buf_len,
+        }
+    }
+
     /// Construct a queue over an external contiguous buffer.
-    /// Safety: `data` must have the expected layout and size.
+    ///
+    /// # Safety
+    ///
+    /// `data` must have the expected layout and size.
     pub unsafe fn queue_from_ptr(
         data: *mut u8,
         n_elems: u32,
@@ -111,8 +130,8 @@ mod tests {
 
         // Fill close to end to force wrap
         let mut wb = q.start_write();
-        wb.write(30).unwrap().copy_from_slice(&vec![0u8; 30]);
-        wb.write(5).unwrap().copy_from_slice(&vec![1u8; 5]); // 5 -> aligned to 8
+        wb.write(30).unwrap().copy_from_slice(&[0u8; 30]);
+        wb.write(5).unwrap().copy_from_slice(&[1u8; 5]); // 5 -> aligned to 8
         let _ = wb.finish();
 
         let rb = q.start_read();
