@@ -77,9 +77,34 @@ MatchingCore::MatchingCore(
       matching_to_aggregation_stats_(shard_num, "matching", "aggregation", matching_to_aggregation_queues),
       matching_to_logging_stats_(shard_num, "matching", "logging", matching_to_logging_queues),
       core_stats_(index_.core_stats.alloc()),
-      logger_(index_.logger.alloc())
+      logger_(index_.logger.alloc()),
+      rust_core_([&] {
+        // Descriptors for the same ingest->matching storage the C++ path
+        // reads. Constructing a Rust queue only reads the shared header, so
+        // the live C++ readers below are unaffected.
+        auto readers = ingest_to_matching_queues.make_readers(shard_num);
+        std::vector<reducer_matching::EqView> eqs;
+        eqs.reserve(readers.size());
+        for (auto &q : readers) {
+          reducer_matching::EqView v;
+          v.data = reinterpret_cast<uint8_t *>(q.shared);
+          v.n_elems = q.elem_mask + 1;
+          v.buf_len = q.buf_mask + 1;
+          eqs.push_back(v);
+        }
+        return reducer_matching::matching_core_new(eqs, static_cast<uint32_t>(shard_num));
+      }())
 {
   add_rpc_clients(ingest_to_matching_queues.make_readers(shard_num), ClientType::ingest, ingest_to_matching_stats_);
+}
+
+void MatchingCore::stop_async()
+{
+  // Cooperative stop for the Rust core. It is idle in this build, but the
+  // startup/shutdown path is exercised in the product so the FFI lifecycle is
+  // proven before the read loop takes over.
+  rust_core_->matching_core_stop();
+  Core::stop_async();
 }
 
 ebpf_net::matching::weak_refs::logger MatchingCore::logger()

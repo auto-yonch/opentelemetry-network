@@ -13,6 +13,11 @@ pub struct ElementQueueShared {
 
 impl ElementQueueShared {
     /// Initialize shared indices to zero using volatile writes to match C semantics.
+    ///
+    /// # Safety
+    ///
+    /// `shared` must be a valid, writable, aligned pointer to an
+    /// `ElementQueueShared` header with no concurrent access.
     pub unsafe fn init(shared: *mut ElementQueueShared) {
         shared.init_zero()
     }
