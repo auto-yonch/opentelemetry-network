@@ -1725,6 +1725,7 @@ dependencies = [
  "cxx",
  "element-queue",
  "encoder_ebpf_net_aggregation",
+ "encoder_ebpf_net_logging",
  "encoder_ebpf_net_matching",
  "otlp_export",
  "proptest",
