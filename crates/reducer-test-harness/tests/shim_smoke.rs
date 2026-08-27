@@ -47,9 +47,12 @@ fn an_injected_message_is_consumed_by_the_core() {
     core.inject("ingest", encode::matching::pulse(T0))
         .expect("the ingest edge should accept a pulse");
 
+    let handled = core.pump().expect("pump after injecting");
     assert!(
-        core.pump().expect("pump after injecting") >= 1,
-        "the core should have read the injected message"
+        handled >= 1,
+        "the core should have read the injected message, handled {handled} passes; \
+         core said: {last_error:?}",
+        last_error = core.last_error()
     );
 }
 
@@ -73,7 +76,9 @@ fn completing_a_timeslot_pulses_aggregation() {
     let downstream = core.drain_all("aggregation").unwrap();
     assert!(
         !downstream.is_empty(),
-        "completing a timeslot should have produced at least one message"
+        "completing a timeslot should have produced at least one message; \
+         core said: {last_error:?}",
+        last_error = core.last_error()
     );
 
     // Exact element sizes are D2/D3's business; here it is enough that what came

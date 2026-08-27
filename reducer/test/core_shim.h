@@ -71,10 +71,14 @@ void otn_core_shim_destroy(otn_core_shim *shim);
 // Returns OTN_SHIM_OK, or a negative error code.
 int64_t otn_core_shim_inject(otn_core_shim *shim, char const *edge, uint8_t const *data, size_t len);
 
-// Runs the core's RPC handling loop until it stops making progress.
+// Runs the core's RPC handling loop until it stops making progress twice in a
+// row.
 //
 // This is the same code path the core's libuv RPC timer drives in production
-// (Core::handle_rpc), called directly so tests are deterministic.
+// (Core::handle_rpc), called directly so tests are deterministic. Two idle
+// passes rather than one because a core's first pass only seeds its virtual
+// clock's timeslot and reports no work; the message that seeded it is handled
+// on the following pass.
 //
 // Returns the number of handling passes that consumed at least one message, or
 // a negative error code.

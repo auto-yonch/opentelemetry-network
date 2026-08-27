@@ -34,6 +34,14 @@ string(REPLACE ";" "\\;" OTN_LINK_ARGS_ESC "${OTN_LINK_ARGS}")
 # OTN_SHIM_LIB tells the harness crate's build script that the shim is on the
 # link line; without it the harness compiles without its FFI bindings, so a
 # plain `cargo test` outside this target still works.
+#
+# RUST_TEST_THREADS=1 is not a speed knob: the C++ cores behind the shim were
+# written for one core per process (the reducer runs a core per thread in
+# separate shards, and the logging core touches process-wide metric state), so
+# the default parallel test harness constructs several of them at once and
+# corrupts the heap. Running the test binaries single-threaded keeps each core
+# alone in the process for its test, and keeps failure output attributable to
+# the test that produced it. Rust-only tests pay a few milliseconds for it.
 execute_process(
   COMMAND ${CMAKE_COMMAND} -E env
     CARGO_TARGET_DIR=${RUST_TEST_TARGET_DIR}
@@ -41,6 +49,7 @@ execute_process(
     OTN_LINK_LIBS=${OTN_LINK_LIBS_ESC}
     OTN_LINK_ARGS=${OTN_LINK_ARGS_ESC}
     OTN_SHIM_LIB=${SHIM_LIB}
+    RUST_TEST_THREADS=1
     cargo test --manifest-path ${PROJ_DIR}/Cargo.toml
   WORKING_DIRECTORY ${PROJ_DIR}
   RESULT_VARIABLE CARGO_RES

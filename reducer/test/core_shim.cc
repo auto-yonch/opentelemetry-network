@@ -35,6 +35,18 @@ constexpr u32 kQueueBufLen = 1u << 20;
 // progress cannot hang the test binary.
 constexpr int64_t kMaxPumpPasses = 4096;
 
+// Idle passes pump() must see in a row before it calls the core quiescent.
+//
+// One is not enough. A core's virtual clock starts with no current timeslot, so
+// the pass that reads the first message updates that message's input, finds
+// VirtualClock::is_current() false (there is no current timeslot yet), leaves
+// the message unread and reports no progress; only VirtualClock::advance() at
+// the end of that pass seeds the timeslot. The message is handled on the pass
+// after. Stopping at the first idle pass would therefore report a fresh core as
+// having consumed nothing, which is what it looks like from the outside
+// (`reducer/util/virtual_clock.cc`).
+constexpr int kIdlePassesUntilQuiescent = 2;
+
 // A core instance plus the edges around it, with the parts of Core that tests
 // need to drive exposed.
 class ShimCore {
@@ -223,6 +235,25 @@ struct otn_core_shim {
 
 namespace {
 
+// Steps the core until it reports no progress `kIdlePassesUntilQuiescent` times
+// in a row. Returns the number of passes that handled at least one message.
+int64_t pump_to_quiescence(ShimCore &core)
+{
+  int64_t handled = 0;
+  int idle = 0;
+
+  for (int64_t pass = 0; pass < kMaxPumpPasses && idle < kIdlePassesUntilQuiescent; ++pass) {
+    if (core.step()) {
+      ++handled;
+      idle = 0;
+    } else {
+      ++idle;
+    }
+  }
+
+  return handled;
+}
+
 // Runs `fn`, turning an escaped C++ exception into an error code plus a message
 // on the handle: exceptions must not cross the C ABI, and the reason a core
 // rejected input (out-of-order timestamps, for instance) is the interesting
@@ -302,15 +333,7 @@ int64_t otn_core_shim_inject(otn_core_shim *shim, char const *edge, uint8_t cons
 
 int64_t otn_core_shim_pump(otn_core_shim *shim)
 {
-  return guarded(shim, [&]() -> int64_t {
-    int64_t passes = 0;
-
-    while (passes < kMaxPumpPasses && shim->core->step()) {
-      ++passes;
-    }
-
-    return passes;
-  });
+  return guarded(shim, [&]() -> int64_t { return pump_to_quiescence(*shim->core); });
 }
 
 int64_t otn_core_shim_advance_clock(otn_core_shim *shim, uint64_t timestamp)
@@ -321,7 +344,9 @@ int64_t otn_core_shim_advance_clock(otn_core_shim *shim, uint64_t timestamp)
       return OTN_SHIM_ERR_INVALID;
     }
 
-    shim->core->step();
+    // Same quiescence rule as pump(): the pass that completes the timeslot may
+    // be preceded by one that only seeds the clock.
+    pump_to_quiescence(*shim->core);
 
     return OTN_SHIM_OK;
   });

@@ -171,8 +171,12 @@ impl Core {
         self.check(code).map(|_| ())
     }
 
-    /// Runs the core's RPC handling until it stops making progress. Returns the
+    /// Runs the core's RPC handling until the core goes quiet. Returns the
     /// number of handling passes that consumed at least one message.
+    ///
+    /// A fresh core needs one pass to seed its virtual clock before it will
+    /// handle anything, so "quiet" means two idle passes in a row; the count
+    /// this returns is of passes that did work, not of passes run.
     pub fn pump(&mut self) -> Result<u64, ShimError> {
         // SAFETY: handle is non-null for the lifetime of self.
         let code = unsafe { ffi::otn_core_shim_pump(self.handle) };
@@ -180,8 +184,8 @@ impl Core {
         self.check(code).map(|passes| passes as u64)
     }
 
-    /// Declares that every upstream edge reached `timestamp` and runs one
-    /// handling pass, which completes the timeslot if the clock advances.
+    /// Declares that every upstream edge reached `timestamp` and runs the core
+    /// to quiescence, which completes the timeslot if the clock advances.
     ///
     /// Pump pending input first: advancing past queued messages makes them
     /// out-of-order.
