@@ -921,6 +921,305 @@ mod tests {
         assert_eq!(req.resource_metrics[0].scope_metrics[0].metrics.len(), 0);
     }
 
+    // -- golden coverage restored from the deleted otlp_grpc_formatter_test.cc --
+    //
+    // These reproduce the exact inputs and expected field values from
+    // `OtlpGrpcFormatterTest.ValidateMetricsRequest` and
+    // `OtlpGrpcFormatterTest.ValidateLogsRequest` (removed in PR #435), now
+    // exercised directly against the extracted functional core instead of
+    // parsing a formatter's JSON-serialized wire request.
+
+    /// Asserts `attributes` is exactly the given label set (order-independent,
+    /// mirroring the deleted test's map-based comparison).
+    fn assert_attributes_match_labels(attributes: &[otlp_common::KeyValue], labels: &[Label]) {
+        assert_eq!(attributes.len(), labels.len(), "attribute count mismatch");
+        for attr in attributes {
+            let expected_value = labels
+                .iter()
+                .find(|l| l.key == attr.key)
+                .unwrap_or_else(|| panic!("unexpected attribute key {:?}", attr.key))
+                .value
+                .as_str();
+            let actual_value = match &attr.value {
+                Some(otlp_common::AnyValue {
+                    value: Some(otlp_common::any_value::Value::StringValue(s)),
+                }) => s.as_str(),
+                other => panic!("expected string value for {:?}, got {:?}", attr.key, other),
+            };
+            assert_eq!(
+                actual_value, expected_value,
+                "attribute {:?} value mismatch",
+                attr.key
+            );
+        }
+    }
+
+    #[test]
+    fn encode_metrics_matches_deleted_golden_tcp_bytes_request() {
+        // Deleted test's first ValidateMetricsRequest block: a u32 gauge-shaped
+        // value published through the u64 FFI entry point (the cxx bridge widens
+        // u32 -> u64 the same way `publish_metric_u64` does).
+        let labels = vec![
+            label("az_equal", "false"),
+            label("daz", "ubuntu-focal"),
+            label("denv", "ubuntu-focal"),
+            label("dns", "ubuntu-focal"),
+            label("dprocess", "sshd"),
+            label("drole", "sshd"),
+            label("dtype", "PROCESS"),
+            label("saz", "(unknown)"),
+            label("senv", "(no agent)"),
+            label("srole", "(unknown)"),
+            label("stype", "IP"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_824_222_222_222;
+        let pending = vec![PendingMetric {
+            name: "tcp.bytes".to_string(),
+            unit: String::new(),
+            description: String::new(),
+            kind: MetricKind::Sum,
+            labels: labels.clone(),
+            timestamp_unix_nano,
+            value: PointValue::U64(57_643),
+        }];
+
+        let req = encode_metrics(&pending, &[], "reducer-ffi");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        assert_eq!(metric.name, "tcp.bytes");
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    otlp_metrics::AggregationTemporality::Delta as i32
+                );
+                assert!(sum.is_monotonic);
+                assert_eq!(sum.data_points.len(), 1);
+                let dp = &sum.data_points[0];
+                assert_eq!(dp.time_unix_nano, timestamp_unix_nano as u64);
+                assert_eq!(
+                    dp.start_time_unix_nano,
+                    timestamp_unix_nano as u64 - 30_000_000_000
+                );
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsInt(57_643))
+                );
+                assert_attributes_match_labels(&dp.attributes, &labels);
+            }
+            other => panic!(
+                "expected Sum data (the deleted golden always encoded these as sums), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn encode_metrics_matches_deleted_golden_tcp_other_metric_request() {
+        // Deleted test's second ValidateMetricsRequest block: a plain u64 value.
+        let labels = vec![
+            label("az_equal", "false"),
+            label("daz", "us-east-1"),
+            label("denv", "ubuntu-focal"),
+            label("dns", "ubuntu-focal"),
+            label("dprocess", "sshd"),
+            label("drole", "sshd"),
+            label("dtype", "PROCESS"),
+            label("saz", "(unknown)"),
+            label("senv", "(no agent)"),
+            label("srole", "(unknown)"),
+            label("stype", "IP"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_827_333_333_333;
+        let pending = vec![PendingMetric {
+            name: "tcp.other_metric".to_string(),
+            unit: String::new(),
+            description: String::new(),
+            kind: MetricKind::Sum,
+            labels: labels.clone(),
+            timestamp_unix_nano,
+            value: PointValue::U64(34_982),
+        }];
+
+        let req = encode_metrics(&pending, &[], "reducer-ffi");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        assert_eq!(metric.name, "tcp.other_metric");
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    otlp_metrics::AggregationTemporality::Delta as i32
+                );
+                assert!(sum.is_monotonic);
+                let dp = &sum.data_points[0];
+                assert_eq!(dp.time_unix_nano, timestamp_unix_nano as u64);
+                assert_eq!(
+                    dp.start_time_unix_nano,
+                    timestamp_unix_nano as u64 - 30_000_000_000
+                );
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsInt(34_982))
+                );
+                assert_attributes_match_labels(&dp.attributes, &labels);
+            }
+            other => panic!("expected Sum data, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn encode_metrics_matches_deleted_golden_tcp_rtt_average_request() {
+        // Deleted test's third ValidateMetricsRequest block: a double value,
+        // still encoded as a Sum (the deleted test asserted `sum` unconditionally).
+        let labels = vec![
+            label("az_equal", "false"),
+            label("daz", "us-west-1"),
+            label("denv", "ubuntu-focal"),
+            label("dns", "ubuntu-focal"),
+            label("dprocess", "sshd"),
+            label("drole", "sshd"),
+            label("dtype", "PROCESS"),
+            label("saz", "(unknown)"),
+            label("senv", "(no agent)"),
+            label("srole", "(unknown)"),
+            label("stype", "IP"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_830_444_444_444;
+        let pending = vec![PendingMetric {
+            name: "tcp.rtt_average".to_string(),
+            unit: String::new(),
+            description: String::new(),
+            kind: MetricKind::Sum,
+            labels: labels.clone(),
+            timestamp_unix_nano,
+            value: PointValue::F64(3.141_592_123_456_789),
+        }];
+
+        let req = encode_metrics(&pending, &[], "reducer-ffi");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        assert_eq!(metric.name, "tcp.rtt_average");
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    otlp_metrics::AggregationTemporality::Delta as i32
+                );
+                assert!(sum.is_monotonic);
+                let dp = &sum.data_points[0];
+                assert_eq!(dp.time_unix_nano, timestamp_unix_nano as u64);
+                assert_eq!(
+                    dp.start_time_unix_nano,
+                    timestamp_unix_nano as u64 - 30_000_000_000
+                );
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsDouble(
+                        3.141_592_123_456_789
+                    ))
+                );
+                assert_attributes_match_labels(&dp.attributes, &labels);
+            }
+            other => panic!("expected Sum data, got {:?}", other),
+        }
+    }
+
+    // -- format_flow_log_body (functional core for the logs-side golden) ------
+
+    #[test]
+    fn format_flow_log_body_matches_deleted_golden_log_line() {
+        // Deleted test's ValidateLogsRequest: sum_srtt=120_000_000, active_rtts=60
+        // -> avg srtt = 120_000_000 / 8 / 1e6 / 60 = 0.25.
+        let labels = vec![
+            label("source.ip", "127.0.0.1"),
+            label("source.workload.name", "frontend"),
+            label("dest.ip", "192.168.0.1"),
+            label("dest.workload.name", "cart-service"),
+        ];
+
+        let body = format_flow_log_body(&labels, 3333, 60, 11, 120_000_000, 55, 2, 7, 88, 9);
+
+        assert_eq!(
+            body,
+            "127.0.0.1 frontend 192.168.0.1 cart-service 3333 60 11 0.25 55 2 7 88 9"
+        );
+    }
+
+    #[test]
+    fn format_flow_log_body_zero_active_rtts_yields_zero_average() {
+        let labels = vec![
+            label("source.ip", "10.0.0.1"),
+            label("source.workload.name", "svc-a"),
+            label("dest.ip", "10.0.0.2"),
+            label("dest.workload.name", "svc-b"),
+        ];
+
+        let body = format_flow_log_body(&labels, 100, 0, 5, 999, 10, 1, 0, 2, 0);
+
+        assert_eq!(body, "10.0.0.1 svc-a 10.0.0.2 svc-b 100 0 5 0 10 1 0 2 0");
+    }
+
+    #[test]
+    fn average_srtt_seconds_is_zero_when_no_active_rtts() {
+        assert_eq!(average_srtt_seconds(120_000_000, 0), 0.0);
+    }
+
+    #[test]
+    fn average_srtt_seconds_divides_sum_by_eight_micros_then_by_sample_count() {
+        assert_eq!(average_srtt_seconds(120_000_000, 60), 0.25);
+    }
+
+    #[test]
+    fn encode_flow_log_matches_deleted_golden_severity_and_timestamp() {
+        let labels = vec![
+            label("source.ip", "127.0.0.1"),
+            label("source.workload.name", "frontend"),
+            label("dest.ip", "192.168.0.1"),
+            label("dest.workload.name", "cart-service"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_822_111_111_111;
+
+        let req = encode_flow_log(
+            &labels,
+            timestamp_unix_nano,
+            3333,
+            60,
+            11,
+            120_000_000,
+            55,
+            2,
+            7,
+            88,
+            9,
+            &[],
+            "reducer-ffi",
+        );
+
+        assert_eq!(req.resource_logs.len(), 1);
+        let rl = &req.resource_logs[0];
+        assert_eq!(rl.scope_logs.len(), 1);
+        let sl = &rl.scope_logs[0];
+        assert_eq!(sl.log_records.len(), 1);
+        let record = &sl.log_records[0];
+
+        assert_eq!(record.time_unix_nano, timestamp_unix_nano as u64);
+        assert_eq!(
+            record.severity_number,
+            otlp_logs::SeverityNumber::Info as i32
+        );
+        assert_eq!(record.severity_text, "INFO");
+        assert_eq!(
+            record.body,
+            Some(otlp_common::AnyValue {
+                value: Some(otlp_common::any_value::Value::StringValue(
+                    "127.0.0.1 frontend 192.168.0.1 cart-service 3333 60 11 0.25 55 2 7 88 9"
+                        .to_string()
+                )),
+            })
+        );
+    }
+
     // -- imperative shell: flush/stats lifecycle (needs an endpoint) -----------
     //
     // These are the only tests in this crate that touch an endpoint. "127.0.0.1:1"
