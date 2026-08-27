@@ -15,6 +15,7 @@ timeslot = { path = "../timeslot" }
 render_parser = { workspace = true }
 encoder_ebpf_net_aggregation = { path = "../render/ebpf_net/aggregation" }
 encoder_ebpf_net_matching = { path = "../render/ebpf_net/matching" }
+encoder_ebpf_net_logging = { path = "../render/ebpf_net/logging" }
 cxx = "1"
 rc-hashmap = { workspace = true }
 otlp_export = { workspace = true }

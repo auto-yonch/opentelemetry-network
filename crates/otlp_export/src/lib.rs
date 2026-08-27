@@ -87,9 +87,11 @@ pub mod ffi {
 }
 
 use ffi::{Label, MetricKind, PublisherStats};
+use opentelemetry_proto::tonic::collector::logs::v1 as otlp_collector_logs;
 use opentelemetry_proto::tonic::collector::metrics::v1 as otlp_collector;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
 use opentelemetry_proto::tonic::common::v1 as otlp_common;
+use opentelemetry_proto::tonic::logs::v1 as otlp_logs;
 use opentelemetry_proto::tonic::metrics::v1 as otlp_metrics;
 use opentelemetry_proto::tonic::resource::v1 as otlp_resource;
 use tokio::runtime::Runtime;
@@ -254,156 +256,8 @@ impl Publisher {
             return;
         }
 
-        // Build OTLP ResourceMetrics -> ScopeMetrics -> Metric with one datapoint each.
-        let mut metrics: Vec<otlp_metrics::Metric> = Vec::with_capacity(self.buf.len());
-        for pm in &self.buf {
-            let attrs = labels_to_otlp_kv(&pm.labels);
-
-            // For sums, set start_time to slot start (30s window) to match reducer semantics.
-            let time_unix_nano = pm.timestamp_unix_nano as u64;
-            let start_time_unix_nano = pm.timestamp_unix_nano.saturating_sub(30_000_000_000) as u64;
-
-            let metric = match pm.kind {
-                MetricKind::Sum => {
-                    let ndp = match pm.value {
-                        PointValue::U64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsInt(
-                                saturating_u64_to_i64(v),
-                            )),
-                        },
-                        PointValue::F64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
-                        },
-                    };
-
-                    let sum = otlp_metrics::Sum {
-                        data_points: vec![ndp],
-                        aggregation_temporality: otlp_metrics::AggregationTemporality::Delta as i32,
-                        is_monotonic: true,
-                    };
-
-                    otlp_metrics::Metric {
-                        name: pm.name.clone(),
-                        description: pm.description.clone(),
-                        unit: pm.unit.clone(),
-                        metadata: vec![],
-                        data: Some(otlp_metrics::metric::Data::Sum(sum)),
-                    }
-                }
-                MetricKind::Gauge => {
-                    let ndp = match pm.value {
-                        PointValue::U64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0, // ignored for Gauge
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsInt(
-                                saturating_u64_to_i64(v),
-                            )),
-                        },
-                        PointValue::F64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
-                        },
-                    };
-                    let gauge = otlp_metrics::Gauge {
-                        data_points: vec![ndp],
-                    };
-                    otlp_metrics::Metric {
-                        name: pm.name.clone(),
-                        description: pm.description.clone(),
-                        unit: pm.unit.clone(),
-                        metadata: vec![],
-                        data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
-                    }
-                }
-                _ => {
-                    let ndp = match pm.value {
-                        PointValue::U64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0, // ignored for Gauge
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsInt(
-                                saturating_u64_to_i64(v),
-                            )),
-                        },
-                        PointValue::F64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
-                        },
-                    };
-                    let gauge = otlp_metrics::Gauge {
-                        data_points: vec![ndp],
-                    };
-                    otlp_metrics::Metric {
-                        name: pm.name.clone(),
-                        description: pm.description.clone(),
-                        unit: pm.unit.clone(),
-                        metadata: vec![],
-                        data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
-                    }
-                }
-            };
-
-            metrics.push(metric);
-        }
-
-        let scope_metrics = otlp_metrics::ScopeMetrics {
-            scope: Some(otlp_common::InstrumentationScope {
-                name: self.scope_name.clone(),
-                version: String::new(),
-                attributes: vec![],
-                dropped_attributes_count: 0,
-            }),
-            metrics,
-            schema_url: String::new(),
-        };
-
-        let resource = otlp_resource::Resource {
-            attributes: self
-                .resource_attributes
-                .iter()
-                .map(|(k, v)| otlp_common::KeyValue {
-                    key: k.clone(),
-                    value: Some(otlp_common::AnyValue {
-                        value: Some(otlp_common::any_value::Value::StringValue(v.clone())),
-                    }),
-                })
-                .collect(),
-            dropped_attributes_count: 0,
-            entity_refs: vec![],
-        };
-
-        let rm = otlp_metrics::ResourceMetrics {
-            resource: Some(resource),
-            scope_metrics: vec![scope_metrics],
-            schema_url: String::new(),
-        };
-
-        let req = otlp_collector::ExportMetricsServiceRequest {
-            resource_metrics: vec![rm],
-        };
+        // Pure functional core: encode the buffered points into the export request.
+        let req = encode_metrics(&self.buf, &self.resource_attributes, &self.scope_name);
 
         // Send synchronously on our runtime.
         let endpoint = self.endpoint.clone();
@@ -461,6 +315,317 @@ impl Publisher {
     }
 }
 
+/// Pure functional core of `Publisher::flush`: turns buffered points into an OTLP
+/// export request. No I/O, no async runtime -- known inputs in, typed prost structs out.
+fn encode_metrics(
+    buf: &[PendingMetric],
+    resource_attributes: &[(String, String)],
+    scope_name: &str,
+) -> otlp_collector::ExportMetricsServiceRequest {
+    // Build OTLP ResourceMetrics -> ScopeMetrics -> Metric with one datapoint each.
+    let mut metrics: Vec<otlp_metrics::Metric> = Vec::with_capacity(buf.len());
+    for pm in buf {
+        let attrs = labels_to_otlp_kv(&pm.labels);
+
+        // For sums, set start_time to slot start (30s window) to match reducer semantics.
+        let time_unix_nano = pm.timestamp_unix_nano as u64;
+        let start_time_unix_nano = pm.timestamp_unix_nano.saturating_sub(30_000_000_000) as u64;
+
+        let metric = match pm.kind {
+            MetricKind::Sum => {
+                let ndp = match pm.value {
+                    PointValue::U64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsInt(
+                            saturating_u64_to_i64(v),
+                        )),
+                    },
+                    PointValue::F64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
+                    },
+                };
+
+                let sum = otlp_metrics::Sum {
+                    data_points: vec![ndp],
+                    aggregation_temporality: otlp_metrics::AggregationTemporality::Delta as i32,
+                    is_monotonic: true,
+                };
+
+                otlp_metrics::Metric {
+                    name: pm.name.clone(),
+                    description: pm.description.clone(),
+                    unit: pm.unit.clone(),
+                    metadata: vec![],
+                    data: Some(otlp_metrics::metric::Data::Sum(sum)),
+                }
+            }
+            MetricKind::Gauge => {
+                let ndp = match pm.value {
+                    PointValue::U64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0, // ignored for Gauge
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsInt(
+                            saturating_u64_to_i64(v),
+                        )),
+                    },
+                    PointValue::F64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
+                    },
+                };
+                let gauge = otlp_metrics::Gauge {
+                    data_points: vec![ndp],
+                };
+                otlp_metrics::Metric {
+                    name: pm.name.clone(),
+                    description: pm.description.clone(),
+                    unit: pm.unit.clone(),
+                    metadata: vec![],
+                    data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
+                }
+            }
+            _ => {
+                let ndp = match pm.value {
+                    PointValue::U64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0, // ignored for Gauge
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsInt(
+                            saturating_u64_to_i64(v),
+                        )),
+                    },
+                    PointValue::F64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
+                    },
+                };
+                let gauge = otlp_metrics::Gauge {
+                    data_points: vec![ndp],
+                };
+                otlp_metrics::Metric {
+                    name: pm.name.clone(),
+                    description: pm.description.clone(),
+                    unit: pm.unit.clone(),
+                    metadata: vec![],
+                    data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
+                }
+            }
+        };
+
+        metrics.push(metric);
+    }
+
+    let scope_metrics = otlp_metrics::ScopeMetrics {
+        scope: Some(otlp_common::InstrumentationScope {
+            name: scope_name.to_string(),
+            version: String::new(),
+            attributes: vec![],
+            dropped_attributes_count: 0,
+        }),
+        metrics,
+        schema_url: String::new(),
+    };
+
+    let resource = otlp_resource::Resource {
+        attributes: resource_attributes
+            .iter()
+            .map(|(k, v)| otlp_common::KeyValue {
+                key: k.clone(),
+                value: Some(otlp_common::AnyValue {
+                    value: Some(otlp_common::any_value::Value::StringValue(v.clone())),
+                }),
+            })
+            .collect(),
+        dropped_attributes_count: 0,
+        entity_refs: vec![],
+    };
+
+    let rm = otlp_metrics::ResourceMetrics {
+        resource: Some(resource),
+        scope_metrics: vec![scope_metrics],
+        schema_url: String::new(),
+    };
+
+    otlp_collector::ExportMetricsServiceRequest {
+        resource_metrics: vec![rm],
+    }
+}
+
+/// Average smoothed round-trip time, in seconds, for a flow-log sample.
+///
+/// Mirrors the C++ reducer's `sum_srtt / 8 / 1e6 / active_rtts` computation:
+/// `sum_srtt` accumulates RTT samples in units of 1/8 microsecond, so dividing
+/// by 8 then 1e6 converts the sum to seconds before averaging over the number
+/// of RTT samples. Zero when there are no active RTT samples to average.
+fn average_srtt_seconds(tcp_sum_srtt: u64, tcp_active_rtts: u32) -> f64 {
+    if tcp_active_rtts == 0 {
+        0.0
+    } else {
+        (tcp_sum_srtt as f64 / 8.0 / 1_000_000.0) / tcp_active_rtts as f64
+    }
+}
+
+/// Looks up a label's value by key, defaulting to empty string when absent
+/// (matching the C++ formatter's `labels_["key"]` map-index semantics).
+fn label_value<'a>(labels: &'a [Label], key: &str) -> &'a str {
+    labels
+        .iter()
+        .find(|l| l.key == key)
+        .map(|l| l.value.as_str())
+        .unwrap_or("")
+}
+
+/// Pure functional core of the flow-log line: the four flow-identity labels
+/// joined with spaces, followed by the nine space-separated numeric fields
+/// (average srtt included). Matches the format produced by the deleted
+/// `otlp_grpc_formatter_test.cc` golden test byte-for-byte.
+///
+/// This closes the production gap left by `Publisher::publish_flow_log`,
+/// which today only accounts for a data point and never formats a log body.
+/// Wiring this into the logs-SDK publish path (batching + `LogsServiceClient`
+/// export, mirroring `flush`'s metrics path) is tracked separately -- this
+/// function and its golden tests are the extracted functional core only.
+fn format_flow_log_body(
+    labels: &[Label],
+    tcp_sum_bytes: u64,
+    tcp_active_rtts: u32,
+    tcp_active_sockets: u32,
+    tcp_sum_srtt: u64,
+    tcp_sum_delivered: u64,
+    tcp_sum_retrans: u64,
+    tcp_syn_timeouts: u64,
+    tcp_new_sockets: u64,
+    tcp_resets: u64,
+) -> String {
+    let avg_srtt = average_srtt_seconds(tcp_sum_srtt, tcp_active_rtts);
+
+    format!(
+        "{} {} {} {} {} {} {} {} {} {} {} {} {}",
+        label_value(labels, "source.ip"),
+        label_value(labels, "source.workload.name"),
+        label_value(labels, "dest.ip"),
+        label_value(labels, "dest.workload.name"),
+        tcp_sum_bytes,
+        tcp_active_rtts,
+        tcp_active_sockets,
+        avg_srtt,
+        tcp_sum_delivered,
+        tcp_sum_retrans,
+        tcp_syn_timeouts,
+        tcp_new_sockets,
+        tcp_resets,
+    )
+}
+
+/// Pure functional core that encodes one flow-log sample into an OTLP
+/// `ExportLogsServiceRequest`, mirroring `encode_metrics`'s shape (one
+/// Resource -> one ScopeLogs -> one LogRecord). No I/O, no async runtime.
+///
+/// Not yet called from `Publisher::publish_flow_log` -- see
+/// `format_flow_log_body`'s doc comment for why wiring stays out of scope.
+#[allow(dead_code)]
+fn encode_flow_log(
+    labels: &[Label],
+    timestamp_unix_nano: i64,
+    tcp_sum_bytes: u64,
+    tcp_active_rtts: u32,
+    tcp_active_sockets: u32,
+    tcp_sum_srtt: u64,
+    tcp_sum_delivered: u64,
+    tcp_sum_retrans: u64,
+    tcp_syn_timeouts: u64,
+    tcp_new_sockets: u64,
+    tcp_resets: u64,
+    resource_attributes: &[(String, String)],
+    scope_name: &str,
+) -> otlp_collector_logs::ExportLogsServiceRequest {
+    let body = format_flow_log_body(
+        labels,
+        tcp_sum_bytes,
+        tcp_active_rtts,
+        tcp_active_sockets,
+        tcp_sum_srtt,
+        tcp_sum_delivered,
+        tcp_sum_retrans,
+        tcp_syn_timeouts,
+        tcp_new_sockets,
+        tcp_resets,
+    );
+
+    let log_record = otlp_logs::LogRecord {
+        time_unix_nano: timestamp_unix_nano as u64,
+        observed_time_unix_nano: 0,
+        severity_number: otlp_logs::SeverityNumber::Info as i32,
+        severity_text: "INFO".to_string(),
+        body: Some(otlp_common::AnyValue {
+            value: Some(otlp_common::any_value::Value::StringValue(body)),
+        }),
+        attributes: labels_to_otlp_kv(labels),
+        dropped_attributes_count: 0,
+        flags: 0,
+        trace_id: vec![],
+        span_id: vec![],
+        event_name: String::new(),
+    };
+
+    let scope_logs = otlp_logs::ScopeLogs {
+        scope: Some(otlp_common::InstrumentationScope {
+            name: scope_name.to_string(),
+            version: String::new(),
+            attributes: vec![],
+            dropped_attributes_count: 0,
+        }),
+        log_records: vec![log_record],
+        schema_url: String::new(),
+    };
+
+    let resource = otlp_resource::Resource {
+        attributes: resource_attributes
+            .iter()
+            .map(|(k, v)| otlp_common::KeyValue {
+                key: k.clone(),
+                value: Some(otlp_common::AnyValue {
+                    value: Some(otlp_common::any_value::Value::StringValue(v.clone())),
+                }),
+            })
+            .collect(),
+        dropped_attributes_count: 0,
+        entity_refs: vec![],
+    };
+
+    let rl = otlp_logs::ResourceLogs {
+        resource: Some(resource),
+        scope_logs: vec![scope_logs],
+        schema_url: String::new(),
+    };
+
+    otlp_collector_logs::ExportLogsServiceRequest {
+        resource_logs: vec![rl],
+    }
+}
+
 fn approx_bytes_metric(name: &str, labels: &Vec<Label>) -> u64 {
     let mut n = name.len() as u64;
     for kv in labels {
@@ -469,7 +634,7 @@ fn approx_bytes_metric(name: &str, labels: &Vec<Label>) -> u64 {
     n
 }
 
-fn labels_to_otlp_kv(labels: &Vec<Label>) -> Vec<otlp_common::KeyValue> {
+fn labels_to_otlp_kv(labels: &[Label]) -> Vec<otlp_common::KeyValue> {
     labels
         .iter()
         .map(|l| otlp_common::KeyValue {
@@ -497,5 +662,616 @@ fn saturating_u64_to_i64(v: u64) -> i64 {
         i64::MAX
     } else {
         v as i64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn label(key: &str, value: &str) -> Label {
+        Label {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    // -- approx_bytes_metric ------------------------------------------------
+
+    #[test]
+    fn approx_bytes_metric_sums_name_and_label_lengths() {
+        // "cpu.load" (8) + ["host"(4)+"a1"(2)+2] + ["region"(6)+"us"(2)+2] = 8 + 8 + 10
+        let labels = vec![label("host", "a1"), label("region", "us")];
+        assert_eq!(approx_bytes_metric("cpu.load", &labels), 26);
+    }
+
+    #[test]
+    fn approx_bytes_metric_with_no_labels_is_just_name_length() {
+        assert_eq!(approx_bytes_metric("tcp.bytes", &vec![]), 9);
+    }
+
+    // -- labels_to_otlp_kv ----------------------------------------------------
+
+    #[test]
+    fn labels_to_otlp_kv_converts_key_value_pairs_in_order() {
+        let labels = vec![label("a", "1"), label("b", "2")];
+        let kvs = labels_to_otlp_kv(&labels);
+
+        assert_eq!(kvs.len(), 2);
+        assert_eq!(kvs[0].key, "a");
+        assert_eq!(
+            kvs[0].value,
+            Some(otlp_common::AnyValue {
+                value: Some(otlp_common::any_value::Value::StringValue("1".to_string())),
+            })
+        );
+        assert_eq!(kvs[1].key, "b");
+        assert_eq!(
+            kvs[1].value,
+            Some(otlp_common::AnyValue {
+                value: Some(otlp_common::any_value::Value::StringValue("2".to_string())),
+            })
+        );
+    }
+
+    #[test]
+    fn labels_to_otlp_kv_empty_input_is_empty_output() {
+        assert!(labels_to_otlp_kv(&[]).is_empty());
+    }
+
+    // -- normalize_grpc_endpoint ----------------------------------------------
+
+    #[test]
+    fn normalize_grpc_endpoint_adds_http_scheme_when_missing() {
+        assert_eq!(
+            normalize_grpc_endpoint("localhost:4317"),
+            "http://localhost:4317"
+        );
+    }
+
+    #[test]
+    fn normalize_grpc_endpoint_preserves_http_scheme() {
+        assert_eq!(
+            normalize_grpc_endpoint("http://localhost:4317"),
+            "http://localhost:4317"
+        );
+    }
+
+    #[test]
+    fn normalize_grpc_endpoint_preserves_https_scheme() {
+        assert_eq!(
+            normalize_grpc_endpoint("https://collector.example.com:4317"),
+            "https://collector.example.com:4317"
+        );
+    }
+
+    #[test]
+    fn normalize_grpc_endpoint_preserves_other_schemes() {
+        assert_eq!(
+            normalize_grpc_endpoint("dns:///collector:4317"),
+            "dns:///collector:4317"
+        );
+    }
+
+    // -- saturating_u64_to_i64 -------------------------------------------------
+
+    #[test]
+    fn saturating_u64_to_i64_passes_through_small_values() {
+        assert_eq!(saturating_u64_to_i64(42), 42i64);
+        assert_eq!(saturating_u64_to_i64(0), 0i64);
+    }
+
+    #[test]
+    fn saturating_u64_to_i64_passes_through_i64_max() {
+        assert_eq!(saturating_u64_to_i64(i64::MAX as u64), i64::MAX);
+    }
+
+    #[test]
+    fn saturating_u64_to_i64_saturates_values_above_i64_max() {
+        assert_eq!(saturating_u64_to_i64(i64::MAX as u64 + 1), i64::MAX);
+        assert_eq!(saturating_u64_to_i64(u64::MAX), i64::MAX);
+    }
+
+    // -- encode_metrics (functional core) --------------------------------------
+
+    #[test]
+    fn encode_metrics_sum_u64_produces_delta_sum_datapoint() {
+        let pending = vec![PendingMetric {
+            name: "tcp.bytes".to_string(),
+            unit: "By".to_string(),
+            description: "TCP bytes".to_string(),
+            kind: MetricKind::Sum,
+            labels: vec![label("host", "node-1")],
+            timestamp_unix_nano: 60_000_000_000,
+            value: PointValue::U64(1234),
+        }];
+        let resource_attributes = vec![("service.name".to_string(), "reducer".to_string())];
+
+        let req = encode_metrics(&pending, &resource_attributes, "reducer-ffi");
+
+        assert_eq!(req.resource_metrics.len(), 1);
+        let rm = &req.resource_metrics[0];
+
+        let resource = rm.resource.as_ref().expect("resource is set");
+        assert_eq!(resource.attributes.len(), 1);
+        assert_eq!(resource.attributes[0].key, "service.name");
+
+        assert_eq!(rm.scope_metrics.len(), 1);
+        let sm = &rm.scope_metrics[0];
+        assert_eq!(sm.scope.as_ref().expect("scope is set").name, "reducer-ffi");
+        assert_eq!(sm.metrics.len(), 1);
+
+        let metric = &sm.metrics[0];
+        assert_eq!(metric.name, "tcp.bytes");
+        assert_eq!(metric.unit, "By");
+        assert_eq!(metric.description, "TCP bytes");
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert!(sum.is_monotonic);
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    otlp_metrics::AggregationTemporality::Delta as i32
+                );
+                assert_eq!(sum.data_points.len(), 1);
+                let dp = &sum.data_points[0];
+                assert_eq!(dp.time_unix_nano, 60_000_000_000);
+                // Start-of-slot semantics: 30s window before the sample time.
+                assert_eq!(dp.start_time_unix_nano, 30_000_000_000);
+                assert_eq!(dp.attributes.len(), 1);
+                assert_eq!(dp.attributes[0].key, "host");
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsInt(1234))
+                );
+            }
+            other => panic!("expected Sum data, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn encode_metrics_gauge_f64_ignores_start_time() {
+        let pending = vec![PendingMetric {
+            name: "cpu.util".to_string(),
+            unit: "1".to_string(),
+            description: "CPU utilization".to_string(),
+            kind: MetricKind::Gauge,
+            labels: vec![],
+            timestamp_unix_nano: 5_000_000_000,
+            value: PointValue::F64(0.42),
+        }];
+
+        let req = encode_metrics(&pending, &[], "scope");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Gauge(gauge) => {
+                assert_eq!(gauge.data_points.len(), 1);
+                let dp = &gauge.data_points[0];
+                assert_eq!(dp.start_time_unix_nano, 0);
+                assert_eq!(dp.time_unix_nano, 5_000_000_000);
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsDouble(0.42))
+                );
+            }
+            other => panic!("expected Gauge data, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn encode_metrics_saturates_large_u64_values_to_i64_max() {
+        let pending = vec![PendingMetric {
+            name: "huge.counter".to_string(),
+            unit: "1".to_string(),
+            description: String::new(),
+            kind: MetricKind::Sum,
+            labels: vec![],
+            timestamp_unix_nano: 1_000_000_000,
+            value: PointValue::U64(u64::MAX),
+        }];
+
+        let req = encode_metrics(&pending, &[], "scope");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.data_points[0].value,
+                    Some(otlp_metrics::number_data_point::Value::AsInt(i64::MAX))
+                );
+            }
+            other => panic!("expected Sum data, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn encode_metrics_preserves_input_order_across_multiple_points() {
+        let pending = vec![
+            PendingMetric {
+                name: "first".to_string(),
+                unit: String::new(),
+                description: String::new(),
+                kind: MetricKind::Gauge,
+                labels: vec![],
+                timestamp_unix_nano: 1,
+                value: PointValue::U64(1),
+            },
+            PendingMetric {
+                name: "second".to_string(),
+                unit: String::new(),
+                description: String::new(),
+                kind: MetricKind::Gauge,
+                labels: vec![],
+                timestamp_unix_nano: 2,
+                value: PointValue::U64(2),
+            },
+        ];
+
+        let req = encode_metrics(&pending, &[], "scope");
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].name, "first");
+        assert_eq!(metrics[1].name, "second");
+    }
+
+    #[test]
+    fn encode_metrics_empty_input_produces_empty_metrics_list() {
+        let req = encode_metrics(&[], &[], "scope");
+        assert_eq!(req.resource_metrics[0].scope_metrics[0].metrics.len(), 0);
+    }
+
+    // -- golden coverage restored from the deleted otlp_grpc_formatter_test.cc --
+    //
+    // These reproduce the exact inputs and expected field values from
+    // `OtlpGrpcFormatterTest.ValidateMetricsRequest` and
+    // `OtlpGrpcFormatterTest.ValidateLogsRequest` (removed in PR #435), now
+    // exercised directly against the extracted functional core instead of
+    // parsing a formatter's JSON-serialized wire request.
+
+    /// Asserts `attributes` is exactly the given label set (order-independent,
+    /// mirroring the deleted test's map-based comparison).
+    fn assert_attributes_match_labels(attributes: &[otlp_common::KeyValue], labels: &[Label]) {
+        assert_eq!(attributes.len(), labels.len(), "attribute count mismatch");
+        for attr in attributes {
+            let expected_value = labels
+                .iter()
+                .find(|l| l.key == attr.key)
+                .unwrap_or_else(|| panic!("unexpected attribute key {:?}", attr.key))
+                .value
+                .as_str();
+            let actual_value = match &attr.value {
+                Some(otlp_common::AnyValue {
+                    value: Some(otlp_common::any_value::Value::StringValue(s)),
+                }) => s.as_str(),
+                other => panic!("expected string value for {:?}, got {:?}", attr.key, other),
+            };
+            assert_eq!(
+                actual_value, expected_value,
+                "attribute {:?} value mismatch",
+                attr.key
+            );
+        }
+    }
+
+    #[test]
+    fn encode_metrics_matches_deleted_golden_tcp_bytes_request() {
+        // Deleted test's first ValidateMetricsRequest block: a u32 gauge-shaped
+        // value published through the u64 FFI entry point (the cxx bridge widens
+        // u32 -> u64 the same way `publish_metric_u64` does).
+        let labels = vec![
+            label("az_equal", "false"),
+            label("daz", "ubuntu-focal"),
+            label("denv", "ubuntu-focal"),
+            label("dns", "ubuntu-focal"),
+            label("dprocess", "sshd"),
+            label("drole", "sshd"),
+            label("dtype", "PROCESS"),
+            label("saz", "(unknown)"),
+            label("senv", "(no agent)"),
+            label("srole", "(unknown)"),
+            label("stype", "IP"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_824_222_222_222;
+        let pending = vec![PendingMetric {
+            name: "tcp.bytes".to_string(),
+            unit: String::new(),
+            description: String::new(),
+            kind: MetricKind::Sum,
+            labels: labels.clone(),
+            timestamp_unix_nano,
+            value: PointValue::U64(57_643),
+        }];
+
+        let req = encode_metrics(&pending, &[], "reducer-ffi");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        assert_eq!(metric.name, "tcp.bytes");
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    otlp_metrics::AggregationTemporality::Delta as i32
+                );
+                assert!(sum.is_monotonic);
+                assert_eq!(sum.data_points.len(), 1);
+                let dp = &sum.data_points[0];
+                assert_eq!(dp.time_unix_nano, timestamp_unix_nano as u64);
+                assert_eq!(
+                    dp.start_time_unix_nano,
+                    timestamp_unix_nano as u64 - 30_000_000_000
+                );
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsInt(57_643))
+                );
+                assert_attributes_match_labels(&dp.attributes, &labels);
+            }
+            other => panic!(
+                "expected Sum data (the deleted golden always encoded these as sums), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn encode_metrics_matches_deleted_golden_tcp_other_metric_request() {
+        // Deleted test's second ValidateMetricsRequest block: a plain u64 value.
+        let labels = vec![
+            label("az_equal", "false"),
+            label("daz", "us-east-1"),
+            label("denv", "ubuntu-focal"),
+            label("dns", "ubuntu-focal"),
+            label("dprocess", "sshd"),
+            label("drole", "sshd"),
+            label("dtype", "PROCESS"),
+            label("saz", "(unknown)"),
+            label("senv", "(no agent)"),
+            label("srole", "(unknown)"),
+            label("stype", "IP"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_827_333_333_333;
+        let pending = vec![PendingMetric {
+            name: "tcp.other_metric".to_string(),
+            unit: String::new(),
+            description: String::new(),
+            kind: MetricKind::Sum,
+            labels: labels.clone(),
+            timestamp_unix_nano,
+            value: PointValue::U64(34_982),
+        }];
+
+        let req = encode_metrics(&pending, &[], "reducer-ffi");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        assert_eq!(metric.name, "tcp.other_metric");
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    otlp_metrics::AggregationTemporality::Delta as i32
+                );
+                assert!(sum.is_monotonic);
+                let dp = &sum.data_points[0];
+                assert_eq!(dp.time_unix_nano, timestamp_unix_nano as u64);
+                assert_eq!(
+                    dp.start_time_unix_nano,
+                    timestamp_unix_nano as u64 - 30_000_000_000
+                );
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsInt(34_982))
+                );
+                assert_attributes_match_labels(&dp.attributes, &labels);
+            }
+            other => panic!("expected Sum data, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn encode_metrics_matches_deleted_golden_tcp_rtt_average_request() {
+        // Deleted test's third ValidateMetricsRequest block: a double value,
+        // still encoded as a Sum (the deleted test asserted `sum` unconditionally).
+        let labels = vec![
+            label("az_equal", "false"),
+            label("daz", "us-west-1"),
+            label("denv", "ubuntu-focal"),
+            label("dns", "ubuntu-focal"),
+            label("dprocess", "sshd"),
+            label("drole", "sshd"),
+            label("dtype", "PROCESS"),
+            label("saz", "(unknown)"),
+            label("senv", "(no agent)"),
+            label("srole", "(unknown)"),
+            label("stype", "IP"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_830_444_444_444;
+        let pending = vec![PendingMetric {
+            name: "tcp.rtt_average".to_string(),
+            unit: String::new(),
+            description: String::new(),
+            kind: MetricKind::Sum,
+            labels: labels.clone(),
+            timestamp_unix_nano,
+            value: PointValue::F64(3.141_592_123_456_789),
+        }];
+
+        let req = encode_metrics(&pending, &[], "reducer-ffi");
+        let metric = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        assert_eq!(metric.name, "tcp.rtt_average");
+
+        match metric.data.as_ref().expect("data is set") {
+            otlp_metrics::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    otlp_metrics::AggregationTemporality::Delta as i32
+                );
+                assert!(sum.is_monotonic);
+                let dp = &sum.data_points[0];
+                assert_eq!(dp.time_unix_nano, timestamp_unix_nano as u64);
+                assert_eq!(
+                    dp.start_time_unix_nano,
+                    timestamp_unix_nano as u64 - 30_000_000_000
+                );
+                assert_eq!(
+                    dp.value,
+                    Some(otlp_metrics::number_data_point::Value::AsDouble(
+                        3.141_592_123_456_789
+                    ))
+                );
+                assert_attributes_match_labels(&dp.attributes, &labels);
+            }
+            other => panic!("expected Sum data, got {:?}", other),
+        }
+    }
+
+    // -- format_flow_log_body (functional core for the logs-side golden) ------
+
+    #[test]
+    fn format_flow_log_body_matches_deleted_golden_log_line() {
+        // Deleted test's ValidateLogsRequest: sum_srtt=120_000_000, active_rtts=60
+        // -> avg srtt = 120_000_000 / 8 / 1e6 / 60 = 0.25.
+        let labels = vec![
+            label("source.ip", "127.0.0.1"),
+            label("source.workload.name", "frontend"),
+            label("dest.ip", "192.168.0.1"),
+            label("dest.workload.name", "cart-service"),
+        ];
+
+        let body = format_flow_log_body(&labels, 3333, 60, 11, 120_000_000, 55, 2, 7, 88, 9);
+
+        assert_eq!(
+            body,
+            "127.0.0.1 frontend 192.168.0.1 cart-service 3333 60 11 0.25 55 2 7 88 9"
+        );
+    }
+
+    #[test]
+    fn format_flow_log_body_zero_active_rtts_yields_zero_average() {
+        let labels = vec![
+            label("source.ip", "10.0.0.1"),
+            label("source.workload.name", "svc-a"),
+            label("dest.ip", "10.0.0.2"),
+            label("dest.workload.name", "svc-b"),
+        ];
+
+        let body = format_flow_log_body(&labels, 100, 0, 5, 999, 10, 1, 0, 2, 0);
+
+        assert_eq!(body, "10.0.0.1 svc-a 10.0.0.2 svc-b 100 0 5 0 10 1 0 2 0");
+    }
+
+    #[test]
+    fn average_srtt_seconds_is_zero_when_no_active_rtts() {
+        assert_eq!(average_srtt_seconds(120_000_000, 0), 0.0);
+    }
+
+    #[test]
+    fn average_srtt_seconds_divides_sum_by_eight_micros_then_by_sample_count() {
+        assert_eq!(average_srtt_seconds(120_000_000, 60), 0.25);
+    }
+
+    #[test]
+    fn encode_flow_log_matches_deleted_golden_severity_and_timestamp() {
+        let labels = vec![
+            label("source.ip", "127.0.0.1"),
+            label("source.workload.name", "frontend"),
+            label("dest.ip", "192.168.0.1"),
+            label("dest.workload.name", "cart-service"),
+        ];
+        let timestamp_unix_nano: i64 = 1_652_901_822_111_111_111;
+
+        let req = encode_flow_log(
+            &labels,
+            timestamp_unix_nano,
+            3333,
+            60,
+            11,
+            120_000_000,
+            55,
+            2,
+            7,
+            88,
+            9,
+            &[],
+            "reducer-ffi",
+        );
+
+        assert_eq!(req.resource_logs.len(), 1);
+        let rl = &req.resource_logs[0];
+        assert_eq!(rl.scope_logs.len(), 1);
+        let sl = &rl.scope_logs[0];
+        assert_eq!(sl.log_records.len(), 1);
+        let record = &sl.log_records[0];
+
+        assert_eq!(record.time_unix_nano, timestamp_unix_nano as u64);
+        assert_eq!(
+            record.severity_number,
+            otlp_logs::SeverityNumber::Info as i32
+        );
+        assert_eq!(record.severity_text, "INFO");
+        assert_eq!(
+            record.body,
+            Some(otlp_common::AnyValue {
+                value: Some(otlp_common::any_value::Value::StringValue(
+                    "127.0.0.1 frontend 192.168.0.1 cart-service 3333 60 11 0.25 55 2 7 88 9"
+                        .to_string()
+                )),
+            })
+        );
+    }
+
+    // -- imperative shell: flush/stats lifecycle (needs an endpoint) -----------
+    //
+    // These are the only tests in this crate that touch an endpoint. "127.0.0.1:1"
+    // has nothing listening, so the connect attempt fails immediately (connection
+    // refused) without needing an in-process mock server or the network.
+
+    #[test]
+    fn flush_on_empty_buffer_is_a_noop() {
+        let mut publisher = otlp_publisher_new("127.0.0.1:1");
+
+        publisher.flush();
+
+        let stats = publisher.stats();
+        assert_eq!(stats.requests_sent, 0);
+        assert_eq!(stats.requests_failed, 0);
+        assert_eq!(stats.data_points_sent, 0);
+        assert_eq!(stats.data_points_failed, 0);
+    }
+
+    #[test]
+    fn flush_against_unreachable_endpoint_records_failure_counters() {
+        let mut publisher = otlp_publisher_new("127.0.0.1:1");
+        publisher.publish_metric_u64(
+            "tcp.bytes",
+            "By",
+            "TCP bytes",
+            MetricKind::Sum,
+            &vec![label("host", "node-1")],
+            1_000_000_000,
+            42,
+        );
+
+        publisher.flush();
+
+        let stats = publisher.stats();
+        assert_eq!(stats.requests_sent, 0);
+        assert_eq!(stats.requests_failed, 1);
+        assert_eq!(stats.data_points_sent, 0);
+        assert_eq!(stats.data_points_failed, 1);
+        assert_eq!(stats.bytes_sent, 0);
+        assert!(stats.bytes_failed > 0);
+    }
+
+    #[test]
+    fn shutdown_flushes_pending_points_before_stopping() {
+        let mut publisher = otlp_publisher_new("127.0.0.1:1");
+        publisher.publish_metric_u64("x", "1", "", MetricKind::Gauge, &vec![], 0, 1);
+
+        publisher.shutdown();
+
+        let stats = publisher.stats();
+        assert_eq!(stats.requests_failed, 1);
+        assert_eq!(stats.data_points_failed, 1);
     }
 }

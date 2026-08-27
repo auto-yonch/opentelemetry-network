@@ -10,7 +10,7 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 cxx = { version = "1.0" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
-opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic", "metrics"] }
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic", "metrics", "logs"] }
 tonic = { version = "0.14", features = ["transport"] }
 
 [build-dependencies]

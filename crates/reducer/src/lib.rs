@@ -10,6 +10,7 @@ mod aggregation_message_handler;
 mod aggregator;
 pub mod ffi;
 mod internal_events;
+pub mod matching;
 mod matching_core;
 pub mod matching_ffi;
 mod matching_message_handler;
