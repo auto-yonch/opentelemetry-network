@@ -11,3 +11,11 @@ encoder_ebpf_net_aggregation = { path = "../render/ebpf_net/aggregation" }
 encoder_ebpf_net_ingest = { path = "../render/ebpf_net/ingest" }
 encoder_ebpf_net_logging = { path = "../render/ebpf_net/logging" }
 encoder_ebpf_net_matching = { path = "../render/ebpf_net/matching" }
+
+# The C++ libraries the shim links (reducerlib, metrics_output) reference the
+# Rust side of the reducer's three cxx bridges: the aggregation core
+# (crates/reducer/src/ffi.rs), the entrypoint (crates/reducer-sys), and the OTLP
+# publisher (crates/otlp_export). Depending on `reducer` pulls all three into the
+# test binary, exactly as reducer-bin does for the shipped binary; without it the
+# link fails on undefined cxxbridge symbols.
+reducer = { path = "../reducer" }

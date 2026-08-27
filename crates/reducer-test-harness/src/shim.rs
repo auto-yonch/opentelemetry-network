@@ -11,6 +11,12 @@ use core::ffi::{c_char, CStr};
 use std::ffi::CString;
 use std::fmt;
 
+// Forces the `reducer` crate into the test binary. Nothing in Rust calls it, but
+// the C++ libraries behind the shim reference the Rust side of the reducer's cxx
+// bridges (aggregation core, entrypoint, OTLP publisher), and an unreferenced
+// crate is not linked -- the symbols would resolve nowhere.
+use reducer as _;
+
 /// Timeslot length of a core's virtual clock, in nanoseconds. The clock divides
 /// timestamps by 1e9 (`VirtualClock`'s default divider), so a timeslot is one
 /// second of virtual time.
