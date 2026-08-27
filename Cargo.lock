@@ -1750,6 +1750,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "reducer-test-harness"
+version = "0.1.0"
+dependencies = [
+ "encoder_ebpf_net_aggregation",
+ "encoder_ebpf_net_ingest",
+ "encoder_ebpf_net_logging",
+ "encoder_ebpf_net_matching",
+ "reducer",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

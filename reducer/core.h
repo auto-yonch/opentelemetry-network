@@ -89,6 +89,15 @@ protected:
 
   Core(std::string_view app_name, size_t shard_num, u64 initial_timestamp);
 
+  // Reads incoming RPC messages that are enqueued in the RPC queue.
+  // Forwards received messages to the RPC handler object to handle.
+  // If any messages are handled, returns true. Otherwise returns false.
+  // Gets invoked periodically by the RPC timer.
+  //
+  // Protected rather than private so that test code can step a core
+  // deterministically, without running its libuv loop on its own thread.
+  bool handle_rpc();
+
 private:
   // Core instance belonging to the current thread.
   // Assigned in run().
@@ -124,12 +133,6 @@ private:
   static void on_rpc_timer(uv_timer_t *timer);
   // Internal stats timer callback.
   static void on_stats_timer(uv_timer_t *timer);
-
-  // Reads incoming RPC messages that are enqueued in the RPC queue.
-  // Forwards received messages to the RPC handler object to handle.
-  // If any messages are handled, returns true. Otherwise returns false.
-  // Gets invoked periodically by the RPC timer.
-  bool handle_rpc();
 
   // Called when the current timeslot is complete.
   virtual void on_timeslot_complete();
