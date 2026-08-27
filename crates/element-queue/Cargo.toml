@@ -8,3 +8,9 @@ license = "Apache-2.0"
 name = "element_queue"
 path = "src/lib.rs"
 
+# Round-trip tests only: the crate itself stays independent of any render
+# package, so the writer works for every generated encoder.
+[dev-dependencies]
+render_parser = { workspace = true }
+encoder_ebpf_net_matching = { path = "../render/ebpf_net/matching" }
+
