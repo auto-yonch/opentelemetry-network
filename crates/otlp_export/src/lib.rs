@@ -87,9 +87,11 @@ pub mod ffi {
 }
 
 use ffi::{Label, MetricKind, PublisherStats};
+use opentelemetry_proto::tonic::collector::logs::v1 as otlp_collector_logs;
 use opentelemetry_proto::tonic::collector::metrics::v1 as otlp_collector;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
 use opentelemetry_proto::tonic::common::v1 as otlp_common;
+use opentelemetry_proto::tonic::logs::v1 as otlp_logs;
 use opentelemetry_proto::tonic::metrics::v1 as otlp_metrics;
 use opentelemetry_proto::tonic::resource::v1 as otlp_resource;
 use tokio::runtime::Runtime;
@@ -471,6 +473,159 @@ fn encode_metrics(
     }
 }
 
+/// Average smoothed round-trip time, in seconds, for a flow-log sample.
+///
+/// Mirrors the C++ reducer's `sum_srtt / 8 / 1e6 / active_rtts` computation:
+/// `sum_srtt` accumulates RTT samples in units of 1/8 microsecond, so dividing
+/// by 8 then 1e6 converts the sum to seconds before averaging over the number
+/// of RTT samples. Zero when there are no active RTT samples to average.
+fn average_srtt_seconds(tcp_sum_srtt: u64, tcp_active_rtts: u32) -> f64 {
+    if tcp_active_rtts == 0 {
+        0.0
+    } else {
+        (tcp_sum_srtt as f64 / 8.0 / 1_000_000.0) / tcp_active_rtts as f64
+    }
+}
+
+/// Looks up a label's value by key, defaulting to empty string when absent
+/// (matching the C++ formatter's `labels_["key"]` map-index semantics).
+fn label_value<'a>(labels: &'a [Label], key: &str) -> &'a str {
+    labels
+        .iter()
+        .find(|l| l.key == key)
+        .map(|l| l.value.as_str())
+        .unwrap_or("")
+}
+
+/// Pure functional core of the flow-log line: the four flow-identity labels
+/// joined with spaces, followed by the nine space-separated numeric fields
+/// (average srtt included). Matches the format produced by the deleted
+/// `otlp_grpc_formatter_test.cc` golden test byte-for-byte.
+///
+/// This closes the production gap left by `Publisher::publish_flow_log`,
+/// which today only accounts for a data point and never formats a log body.
+/// Wiring this into the logs-SDK publish path (batching + `LogsServiceClient`
+/// export, mirroring `flush`'s metrics path) is tracked separately -- this
+/// function and its golden tests are the extracted functional core only.
+fn format_flow_log_body(
+    labels: &[Label],
+    tcp_sum_bytes: u64,
+    tcp_active_rtts: u32,
+    tcp_active_sockets: u32,
+    tcp_sum_srtt: u64,
+    tcp_sum_delivered: u64,
+    tcp_sum_retrans: u64,
+    tcp_syn_timeouts: u64,
+    tcp_new_sockets: u64,
+    tcp_resets: u64,
+) -> String {
+    let avg_srtt = average_srtt_seconds(tcp_sum_srtt, tcp_active_rtts);
+
+    format!(
+        "{} {} {} {} {} {} {} {} {} {} {} {} {}",
+        label_value(labels, "source.ip"),
+        label_value(labels, "source.workload.name"),
+        label_value(labels, "dest.ip"),
+        label_value(labels, "dest.workload.name"),
+        tcp_sum_bytes,
+        tcp_active_rtts,
+        tcp_active_sockets,
+        avg_srtt,
+        tcp_sum_delivered,
+        tcp_sum_retrans,
+        tcp_syn_timeouts,
+        tcp_new_sockets,
+        tcp_resets,
+    )
+}
+
+/// Pure functional core that encodes one flow-log sample into an OTLP
+/// `ExportLogsServiceRequest`, mirroring `encode_metrics`'s shape (one
+/// Resource -> one ScopeLogs -> one LogRecord). No I/O, no async runtime.
+///
+/// Not yet called from `Publisher::publish_flow_log` -- see
+/// `format_flow_log_body`'s doc comment for why wiring stays out of scope.
+#[allow(dead_code)]
+fn encode_flow_log(
+    labels: &[Label],
+    timestamp_unix_nano: i64,
+    tcp_sum_bytes: u64,
+    tcp_active_rtts: u32,
+    tcp_active_sockets: u32,
+    tcp_sum_srtt: u64,
+    tcp_sum_delivered: u64,
+    tcp_sum_retrans: u64,
+    tcp_syn_timeouts: u64,
+    tcp_new_sockets: u64,
+    tcp_resets: u64,
+    resource_attributes: &[(String, String)],
+    scope_name: &str,
+) -> otlp_collector_logs::ExportLogsServiceRequest {
+    let body = format_flow_log_body(
+        labels,
+        tcp_sum_bytes,
+        tcp_active_rtts,
+        tcp_active_sockets,
+        tcp_sum_srtt,
+        tcp_sum_delivered,
+        tcp_sum_retrans,
+        tcp_syn_timeouts,
+        tcp_new_sockets,
+        tcp_resets,
+    );
+
+    let log_record = otlp_logs::LogRecord {
+        time_unix_nano: timestamp_unix_nano as u64,
+        observed_time_unix_nano: 0,
+        severity_number: otlp_logs::SeverityNumber::Info as i32,
+        severity_text: "INFO".to_string(),
+        body: Some(otlp_common::AnyValue {
+            value: Some(otlp_common::any_value::Value::StringValue(body)),
+        }),
+        attributes: labels_to_otlp_kv(labels),
+        dropped_attributes_count: 0,
+        flags: 0,
+        trace_id: vec![],
+        span_id: vec![],
+        event_name: String::new(),
+    };
+
+    let scope_logs = otlp_logs::ScopeLogs {
+        scope: Some(otlp_common::InstrumentationScope {
+            name: scope_name.to_string(),
+            version: String::new(),
+            attributes: vec![],
+            dropped_attributes_count: 0,
+        }),
+        log_records: vec![log_record],
+        schema_url: String::new(),
+    };
+
+    let resource = otlp_resource::Resource {
+        attributes: resource_attributes
+            .iter()
+            .map(|(k, v)| otlp_common::KeyValue {
+                key: k.clone(),
+                value: Some(otlp_common::AnyValue {
+                    value: Some(otlp_common::any_value::Value::StringValue(v.clone())),
+                }),
+            })
+            .collect(),
+        dropped_attributes_count: 0,
+        entity_refs: vec![],
+    };
+
+    let rl = otlp_logs::ResourceLogs {
+        resource: Some(resource),
+        scope_logs: vec![scope_logs],
+        schema_url: String::new(),
+    };
+
+    otlp_collector_logs::ExportLogsServiceRequest {
+        resource_logs: vec![rl],
+    }
+}
+
 fn approx_bytes_metric(name: &str, labels: &Vec<Label>) -> u64 {
     let mut n = name.len() as u64;
     for kv in labels {
@@ -479,7 +634,7 @@ fn approx_bytes_metric(name: &str, labels: &Vec<Label>) -> u64 {
     n
 }
 
-fn labels_to_otlp_kv(labels: &Vec<Label>) -> Vec<otlp_common::KeyValue> {
+fn labels_to_otlp_kv(labels: &[Label]) -> Vec<otlp_common::KeyValue> {
     labels
         .iter()
         .map(|l| otlp_common::KeyValue {
@@ -561,7 +716,7 @@ mod tests {
 
     #[test]
     fn labels_to_otlp_kv_empty_input_is_empty_output() {
-        assert!(labels_to_otlp_kv(&vec![]).is_empty());
+        assert!(labels_to_otlp_kv(&[]).is_empty());
     }
 
     // -- normalize_grpc_endpoint ----------------------------------------------
