@@ -19,6 +19,8 @@
 #include <generated/ebpf_net/matching/span_base.h>
 #include <generated/ebpf_net/matching/transform_builder.h>
 
+#include <reducer_matching_cxxbridge.h>
+
 #include <memory>
 
 namespace reducer {
@@ -61,6 +63,12 @@ public:
   // Logger instance.
   ::ebpf_net::matching::weak_refs::logger logger();
 
+  // Stops this core, including the Rust core that is wired in but idle.
+  //
+  // Hides the non-virtual Core::stop_async(); reducer.cc holds MatchingCore
+  // pointers, so shutdown reaches this override.
+  void stop_async();
+
 private:
   // Flag indicating whether IP addresses should be used for autonomous systems.
   static bool autonomous_system_ip_enabled_;
@@ -85,6 +93,14 @@ private:
 
   // Outputs internal stats to be scraped by a time-series DB.
   void write_internal_stats() override;
+
+  // Opaque Rust MatchingCore owned via cxx rust::Box.
+  //
+  // Constructed over the same ingest->matching queues the C++ path reads, but
+  // never run: this core is wired in idle while the generated C++ Index
+  // remains the live processing path. Its read loop is enabled in a later
+  // step, once flow matching and enrichment are ported.
+  rust::Box<reducer_matching::MatchingCore> rust_core_;
 };
 
 } // namespace reducer::matching

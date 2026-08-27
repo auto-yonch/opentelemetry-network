@@ -15,6 +15,12 @@ add_rust_cxxbridge(
   ${CMAKE_SOURCE_DIR}/crates/reducer/src/ffi.rs
 )
 
+# CXX bridge for Rust MatchingCore (reducer crate side)
+add_rust_cxxbridge(
+  reducer_matching_cxxbridge
+  ${CMAKE_SOURCE_DIR}/crates/reducer/src/matching_ffi.rs
+)
+
 # Reducer library
 #
 add_library(
@@ -55,6 +61,7 @@ target_link_libraries(
   reducerlib
     reducer_entrypoint_cxxbridge
     reducer_aggregation_cxxbridge
+    reducer_matching_cxxbridge
     signal_handler
     metrics_output
     render_pipeline
