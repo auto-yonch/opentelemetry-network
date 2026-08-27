@@ -254,156 +254,8 @@ impl Publisher {
             return;
         }
 
-        // Build OTLP ResourceMetrics -> ScopeMetrics -> Metric with one datapoint each.
-        let mut metrics: Vec<otlp_metrics::Metric> = Vec::with_capacity(self.buf.len());
-        for pm in &self.buf {
-            let attrs = labels_to_otlp_kv(&pm.labels);
-
-            // For sums, set start_time to slot start (30s window) to match reducer semantics.
-            let time_unix_nano = pm.timestamp_unix_nano as u64;
-            let start_time_unix_nano = pm.timestamp_unix_nano.saturating_sub(30_000_000_000) as u64;
-
-            let metric = match pm.kind {
-                MetricKind::Sum => {
-                    let ndp = match pm.value {
-                        PointValue::U64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsInt(
-                                saturating_u64_to_i64(v),
-                            )),
-                        },
-                        PointValue::F64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
-                        },
-                    };
-
-                    let sum = otlp_metrics::Sum {
-                        data_points: vec![ndp],
-                        aggregation_temporality: otlp_metrics::AggregationTemporality::Delta as i32,
-                        is_monotonic: true,
-                    };
-
-                    otlp_metrics::Metric {
-                        name: pm.name.clone(),
-                        description: pm.description.clone(),
-                        unit: pm.unit.clone(),
-                        metadata: vec![],
-                        data: Some(otlp_metrics::metric::Data::Sum(sum)),
-                    }
-                }
-                MetricKind::Gauge => {
-                    let ndp = match pm.value {
-                        PointValue::U64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0, // ignored for Gauge
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsInt(
-                                saturating_u64_to_i64(v),
-                            )),
-                        },
-                        PointValue::F64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
-                        },
-                    };
-                    let gauge = otlp_metrics::Gauge {
-                        data_points: vec![ndp],
-                    };
-                    otlp_metrics::Metric {
-                        name: pm.name.clone(),
-                        description: pm.description.clone(),
-                        unit: pm.unit.clone(),
-                        metadata: vec![],
-                        data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
-                    }
-                }
-                _ => {
-                    let ndp = match pm.value {
-                        PointValue::U64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0, // ignored for Gauge
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsInt(
-                                saturating_u64_to_i64(v),
-                            )),
-                        },
-                        PointValue::F64(v) => otlp_metrics::NumberDataPoint {
-                            attributes: attrs,
-                            start_time_unix_nano: 0,
-                            time_unix_nano,
-                            exemplars: vec![],
-                            flags: 0,
-                            value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
-                        },
-                    };
-                    let gauge = otlp_metrics::Gauge {
-                        data_points: vec![ndp],
-                    };
-                    otlp_metrics::Metric {
-                        name: pm.name.clone(),
-                        description: pm.description.clone(),
-                        unit: pm.unit.clone(),
-                        metadata: vec![],
-                        data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
-                    }
-                }
-            };
-
-            metrics.push(metric);
-        }
-
-        let scope_metrics = otlp_metrics::ScopeMetrics {
-            scope: Some(otlp_common::InstrumentationScope {
-                name: self.scope_name.clone(),
-                version: String::new(),
-                attributes: vec![],
-                dropped_attributes_count: 0,
-            }),
-            metrics,
-            schema_url: String::new(),
-        };
-
-        let resource = otlp_resource::Resource {
-            attributes: self
-                .resource_attributes
-                .iter()
-                .map(|(k, v)| otlp_common::KeyValue {
-                    key: k.clone(),
-                    value: Some(otlp_common::AnyValue {
-                        value: Some(otlp_common::any_value::Value::StringValue(v.clone())),
-                    }),
-                })
-                .collect(),
-            dropped_attributes_count: 0,
-            entity_refs: vec![],
-        };
-
-        let rm = otlp_metrics::ResourceMetrics {
-            resource: Some(resource),
-            scope_metrics: vec![scope_metrics],
-            schema_url: String::new(),
-        };
-
-        let req = otlp_collector::ExportMetricsServiceRequest {
-            resource_metrics: vec![rm],
-        };
+        // Pure functional core: encode the buffered points into the export request.
+        let req = encode_metrics(&self.buf, &self.resource_attributes, &self.scope_name);
 
         // Send synchronously on our runtime.
         let endpoint = self.endpoint.clone();
@@ -458,6 +310,164 @@ impl Publisher {
             requests_failed: self.requests_failed,
             unknown_response_tags: self.unknown_response_tags,
         }
+    }
+}
+
+/// Pure functional core of `Publisher::flush`: turns buffered points into an OTLP
+/// export request. No I/O, no async runtime -- known inputs in, typed prost structs out.
+fn encode_metrics(
+    buf: &[PendingMetric],
+    resource_attributes: &[(String, String)],
+    scope_name: &str,
+) -> otlp_collector::ExportMetricsServiceRequest {
+    // Build OTLP ResourceMetrics -> ScopeMetrics -> Metric with one datapoint each.
+    let mut metrics: Vec<otlp_metrics::Metric> = Vec::with_capacity(buf.len());
+    for pm in buf {
+        let attrs = labels_to_otlp_kv(&pm.labels);
+
+        // For sums, set start_time to slot start (30s window) to match reducer semantics.
+        let time_unix_nano = pm.timestamp_unix_nano as u64;
+        let start_time_unix_nano = pm.timestamp_unix_nano.saturating_sub(30_000_000_000) as u64;
+
+        let metric = match pm.kind {
+            MetricKind::Sum => {
+                let ndp = match pm.value {
+                    PointValue::U64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsInt(
+                            saturating_u64_to_i64(v),
+                        )),
+                    },
+                    PointValue::F64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
+                    },
+                };
+
+                let sum = otlp_metrics::Sum {
+                    data_points: vec![ndp],
+                    aggregation_temporality: otlp_metrics::AggregationTemporality::Delta as i32,
+                    is_monotonic: true,
+                };
+
+                otlp_metrics::Metric {
+                    name: pm.name.clone(),
+                    description: pm.description.clone(),
+                    unit: pm.unit.clone(),
+                    metadata: vec![],
+                    data: Some(otlp_metrics::metric::Data::Sum(sum)),
+                }
+            }
+            MetricKind::Gauge => {
+                let ndp = match pm.value {
+                    PointValue::U64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0, // ignored for Gauge
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsInt(
+                            saturating_u64_to_i64(v),
+                        )),
+                    },
+                    PointValue::F64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
+                    },
+                };
+                let gauge = otlp_metrics::Gauge {
+                    data_points: vec![ndp],
+                };
+                otlp_metrics::Metric {
+                    name: pm.name.clone(),
+                    description: pm.description.clone(),
+                    unit: pm.unit.clone(),
+                    metadata: vec![],
+                    data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
+                }
+            }
+            _ => {
+                let ndp = match pm.value {
+                    PointValue::U64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0, // ignored for Gauge
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsInt(
+                            saturating_u64_to_i64(v),
+                        )),
+                    },
+                    PointValue::F64(v) => otlp_metrics::NumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: 0,
+                        time_unix_nano,
+                        exemplars: vec![],
+                        flags: 0,
+                        value: Some(otlp_metrics::number_data_point::Value::AsDouble(v)),
+                    },
+                };
+                let gauge = otlp_metrics::Gauge {
+                    data_points: vec![ndp],
+                };
+                otlp_metrics::Metric {
+                    name: pm.name.clone(),
+                    description: pm.description.clone(),
+                    unit: pm.unit.clone(),
+                    metadata: vec![],
+                    data: Some(otlp_metrics::metric::Data::Gauge(gauge)),
+                }
+            }
+        };
+
+        metrics.push(metric);
+    }
+
+    let scope_metrics = otlp_metrics::ScopeMetrics {
+        scope: Some(otlp_common::InstrumentationScope {
+            name: scope_name.to_string(),
+            version: String::new(),
+            attributes: vec![],
+            dropped_attributes_count: 0,
+        }),
+        metrics,
+        schema_url: String::new(),
+    };
+
+    let resource = otlp_resource::Resource {
+        attributes: resource_attributes
+            .iter()
+            .map(|(k, v)| otlp_common::KeyValue {
+                key: k.clone(),
+                value: Some(otlp_common::AnyValue {
+                    value: Some(otlp_common::any_value::Value::StringValue(v.clone())),
+                }),
+            })
+            .collect(),
+        dropped_attributes_count: 0,
+        entity_refs: vec![],
+    };
+
+    let rm = otlp_metrics::ResourceMetrics {
+        resource: Some(resource),
+        scope_metrics: vec![scope_metrics],
+        schema_url: String::new(),
+    };
+
+    otlp_collector::ExportMetricsServiceRequest {
+        resource_metrics: vec![rm],
     }
 }
 
